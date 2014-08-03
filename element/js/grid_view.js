@@ -3,6 +3,7 @@
 /* global GaiaGrid */
 /* global GridLayout */
 /* global GridZoom */
+/* global LazyLoader */
 
 (function(exports) {
 
@@ -20,10 +21,6 @@
 
     if (config.features.zoom) {
       this.zoom = new GridZoom(this);
-    }
-
-    if (config.features.dragdrop) {
-      this.dragdrop = new GridDragDrop(this);
     }
 
     this.layout = new GridLayout(this);
@@ -86,9 +83,16 @@
         }
 
         this.icons[item.identifier] = item;
+      } else if (item.detail.type !== 'divider' &&
+        item.detail.type !== 'placeholder') {
+        // If the item does not have an identifier, and is not a placeholder
+        // or divider, do not add it to the grid.
+        console.log('Error, could not load identifier for object: ',
+            JSON.stringify(item.detail));
+        return;
       }
 
-      // If isnsertTo it is a number, splice.
+      // If insertTo it is a number, splice.
       if (!isNaN(parseFloat(insertTo)) && isFinite(insertTo)) {
         this.items.splice(insertTo, 0, item);
       } else {
@@ -153,7 +157,6 @@
         container = e.target.parentNode;
         action = 'remove';
       }
-
       var identifier = container.dataset.identifier;
       var icon = this.icons[identifier];
       var inEditMode = this.dragdrop && this.dragdrop.inEditMode;
@@ -345,6 +348,17 @@
         y++;
       }
 
+      var pendingCachedIcons = 0;
+      var onCachedIconRendered = () => {
+        if (--pendingCachedIcons <= 0) {
+          this.element.removeEventListener('cached-icon-rendered',
+                                            onCachedIconRendered);
+          this.element.dispatchEvent(new CustomEvent('cached-icons-rendered'));
+        }
+      };
+      this.element.addEventListener('cached-icon-rendered',
+                                     onCachedIconRendered);
+
       for (var idx = 0; idx <= to; idx++) {
         var item = this.items[idx];
 
@@ -369,6 +383,7 @@
         }
 
         if (idx >= from) {
+          item.hasCachedIcon && ++pendingCachedIcons;
           item.render([x, y], idx);
         }
 
@@ -381,6 +396,25 @@
       }
 
       this.element.setAttribute('cols', this.layout.cols);
+      pendingCachedIcons === 0 && onCachedIconRendered();
+      this.loadDragDrop();
+    },
+
+    /**
+     * Loads dragdrop libraries and instantiates if necessary.
+     * DragDrop libraries are lazy laoded to save on startup time. They are
+     * loaded after the initial paint in order to paint the icons as fast
+     * as possible.
+     */
+    loadDragDrop: function() {
+      if (!this.dragdrop && this.config.features.dragdrop) {
+        LazyLoader.load('shared/elements/gaia_grid/js/grid_dragdrop.js', () => {
+          if (this.dragdrop) {
+            return;
+          }
+          this.dragdrop = new GridDragDrop(this);
+        });
+      }
     }
   };
 

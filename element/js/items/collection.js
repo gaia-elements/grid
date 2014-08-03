@@ -24,7 +24,7 @@
       query: collection.query,
       icon: collection.icon,
       pinned: collection.pinned,
-      defaultIconBlob: collection.defaultIconBlob
+      decoratedIconBlob: collection.decoratedIconBlob
     };
 
     // XXX: One listener per collection may not be ideal.
@@ -97,10 +97,15 @@
      * Launches the application for this icon.
      */
     launch: function() {
-      new MozActivity({
+      this.grid.element.dispatchEvent(new CustomEvent('collection-launch'));
+      var activity = new MozActivity({
         name: 'view-collection',
         data: this.detail
       });
+
+      activity.onsuccess = activity.onerror = () => {
+        this.grid.element.dispatchEvent(new CustomEvent('collection-close'));
+      };
     },
 
 
@@ -110,16 +115,6 @@
     edit: function() {
       new MozActivity({
         name: 'update-collection',
-        data: this.detail
-      });
-    },
-
-    /**
-     * Uninstalls the application.
-     */
-    remove: function() {
-      new MozActivity({
-        name: 'delete-collection',
         data: this.detail
       });
     }

@@ -1,11 +1,12 @@
 'use strict';
 /* global GridIconRenderer */
 /* global Promise */
+/* global UrlHelper */
 
 (function(exports) {
 
   // event names
-  const ICON_BLOB_LOAD_EVENT = 'gaiagrid-iconblobload';
+  const ICON_BLOB_DECORATED_EVENT = 'iconblobdecorated';
   const ICON_BLOB_ERROR_EVENT = 'gaiagrid-iconbloberror';
   const FETCH_XHR_TIMEOUT = 10000;
 
@@ -75,6 +76,13 @@
      * Whether or not this icon will persist to the database.
      */
     persistToDB: true,
+
+    /**
+     * Whether or not this item has a cached icon or not.
+     */
+    get hasCachedIcon() {
+      return this.detail && this.detail.decoratedIconBlob;
+    },
 
     /**
      * The icon renderer to use. Sub-classes may override this, and individual
@@ -150,6 +158,53 @@
     },
 
     /**
+     * Given a list of icons that match a size, return the closest icon to
+     * reduce possible pixelation by picking a wrong size.
+     * @param {Object} choices An object mapping icon size to icon URL.
+     */
+    closestIconFromList: function(choices) {
+      if (!choices) {
+        return this.defaultIcon;
+      }
+
+      // Create a list with the sizes and order it by descending size.
+      var list = Object.keys(choices).map(function(size) {
+        return size;
+      }).sort(function(a, b) {
+        return b - a;
+      });
+
+      var length = list.length;
+      if (length === 0) {
+        // No icons -> return the default icon.
+        return this.defaultIcon;
+      }
+
+      var maxSize = this.grid.layout.gridMaxIconSize; // The goal size
+      var accurateSize = list[0]; // The biggest icon available
+      for (var i = 0; i < length; i++) {
+        var size = list[i];
+
+        if (size < maxSize) {
+          break;
+        }
+
+        accurateSize = size;
+      }
+
+      var icon = choices[accurateSize];
+
+      // Handle relative URLs
+      if (!UrlHelper.hasScheme(icon)) {
+        var a = document.createElement('a');
+        a.href = this.app.origin;
+        icon = a.protocol + '//' + a.host + icon;
+      }
+
+      return icon;
+    },
+
+    /**
      * Renders the given image src as the icon (with processing).
      *
      * @param {String} url The image url to display.
@@ -192,14 +247,88 @@
      *
      * @param {Blob} blob The image blob to display.
      */
-    _displayDecoratedIcon: function(blob) {
-      this.element.style.height = this.grid.layout.gridItemHeight + 'px';
-      // icon size + padding for shadows implemented in the icon renderer
-      this.element.style.backgroundSize =
-        ((this.grid.layout.gridIconSize * (1 / this.scale)) +
-        this.rendererInstance.unscaledCanvasPadding) + 'px';
-      this.element.style.backgroundImage =
-        'url(' + URL.createObjectURL(blob) + ')';
+    _displayDecoratedIcon: function(blob, isCachedIcon) {
+      if (!this.element) {
+        // The icon could be removed while it is being decorated
+        return;
+      }
+
+      var style = this.element.style;
+
+      if (!style.backgroundSize) {
+        style.height = this.grid.layout.gridItemHeight + 'px';
+        // icon size + padding for shadows implemented in the icon renderer
+        style.backgroundSize =
+          ((this.grid.layout.gridIconSize * (1 / this.scale)) +
+          GridIconRenderer.prototype.unscaledCanvasPadding) + 'px';
+      }
+
+      if (isCachedIcon) {
+        var url = URL.createObjectURL(blob);
+        style.backgroundImage = 'url(' + url + ')';
+        this.element.dataset.backgroundImage = url;
+        var img = new Image();
+        img.onload = img.onerror = () => {
+          this.grid.element.dispatchEvent(
+            new CustomEvent('cached-icon-rendered')
+          );
+        };
+        img.src = url;
+        return;
+      }
+
+      this._compareBlobs(blob, this.detail.decoratedIconBlob).
+      then((equal) => {
+        if (equal) {
+          return;
+        }
+
+        style.backgroundImage = 'url(' + URL.createObjectURL(blob) + ')';
+        this.detail.decoratedIconBlob = blob;
+        this.grid.element.dispatchEvent(
+          new CustomEvent(ICON_BLOB_DECORATED_EVENT, {
+            detail: this
+          })
+        );
+        var bgImg = this.element.dataset.backgroundImage;
+        bgImg && URL.revokeObjectURL(bgImg);
+      });
+    },
+
+    /**
+     * It compares two blobs.
+     */
+    _compareBlobs: function(blob1, blob2) {
+      return new Promise(function(resolve) {
+        if (!blob1 || !blob2 || blob1.type !== blob2.type ||
+           blob1.size !== blob2.size) {
+          resolve(false);
+          return;
+        }
+
+        // We skip the first bytes that typically are headers
+        var startBytes = 127;
+        var bytesHash = 16;
+        var reader = new FileReader();
+
+        reader.onloadend = function() {
+          var result1 = reader.result;
+
+          reader = new FileReader();
+
+          reader.onloadend = reader.onerror = function() {
+            resolve(result1 === reader.result);
+          };
+
+          reader.readAsDataURL(blob2.slice(startBytes, startBytes + bytesHash));
+        };
+
+        reader.onerror = function() {
+          resolve(false);
+        };
+
+        reader.readAsDataURL(blob1.slice(startBytes, startBytes + bytesHash));
+      });
     },
 
     /**
@@ -218,7 +347,7 @@
      */
     _stampElementWithIcon: function(uri) {
       // ensure we don't stamp URI
-      if (uri.startsWith('data:')) {
+      if (!this.element || uri.startsWith('data:')) {
         return;
       }
 
@@ -238,10 +367,26 @@
     XXX: This method is not concurrency safe one image may override another
          without ordering.
     */
-    renderIcon: function() {
+    renderIcon: function(renderCachedIcon) {
       var icon = this.icon;
       this.iconState = 'pending';
 
+      if (renderCachedIcon && this.hasCachedIcon) {
+        // Display cached icons before trying to get icons again.
+        this._displayDecoratedIcon(this.detail.decoratedIconBlob, true);
+        var resolveIcon = () => {
+          this.grid.element.removeEventListener('cached-icons-rendered',
+                                                 resolveIcon);
+          this.doRenderIcon(icon);
+        };
+        this.grid.element.addEventListener('cached-icons-rendered',
+                                            resolveIcon);
+      } else {
+        this.doRenderIcon(icon);
+      }
+    },
+
+    doRenderIcon: function(icon) {
       // fast path if the icon is not from an origin display it outright
       if (!this.isIconFromOrigin()) {
         // XXX: Should we convert data uri(s) to blobs?
@@ -262,13 +407,11 @@
       var blobNotFound = () => {
         this.iconState = 'error';
 
-        if (this.detail.defaultIconBlob) {
-          // no stamp for saved blobs
-          this.renderIconFromBlob(this.detail.defaultIconBlob);
-          this._stampElementWithIcon('blobcache');
-        } else {
+        if (!this.hasCachedIcon) {
           this.renderIconFromSrc(this.defaultIcon);
           this._stampElementWithIcon(this.defaultIcon);
+        } else {
+          this._stampElementWithIcon('blobcache');
         }
 
         eventTarget.dispatchEvent(
@@ -288,19 +431,47 @@
 
           this.renderIconFromBlob(blob);
           this.iconState = 'success';
-          this.detail.defaultIconBlob = blob;
           this._stampElementWithIcon(icon);
-
-          eventTarget.dispatchEvent(
-            new CustomEvent(ICON_BLOB_LOAD_EVENT, {
-              detail: this
-            })
-          );
         }).
         catch((err) => {
           console.error('Error fetching icon', err);
           blobNotFound();
         });
+    },
+
+    /**
+    Safely remove this item from the grid and DOM.
+    */
+    removeFromGrid: function() {
+      var idx = this.grid.items.indexOf(this);
+
+      // This should never happen but is remotely possible item is not in the
+      // grid.
+      if (idx === -1) {
+        console.error('Attempting to remove self before item has been added!');
+        return;
+      }
+
+      // update the state of the grid and DOM so this item is no longer
+      // referenced.
+      this.grid.items.splice(idx, 1);
+      delete this.grid.icons[this.identifier];
+
+      if (this.element) {
+        this.element.parentNode.removeChild(this.element);
+      }
+
+      // ensure we don't end up with empty cruft..
+      this.grid.render({ from: idx - 1 });
+    },
+
+    /**
+    Removes item from the dom and dispatches a removeitem event.
+    */
+    remove: function() {
+      this.grid.element.dispatchEvent(new CustomEvent('removeitem', {
+        detail: this
+      }));
     },
 
     /**
@@ -324,7 +495,7 @@
         var nameContainerEl = document.createElement('p');
         nameContainerEl.style.marginTop = ((this.grid.layout.gridIconSize *
           (1 / this.scale)) +
-          GridIconRenderer.prototype.unscaledCanvasPadding) + 'px';
+          (GridIconRenderer.prototype.unscaledCanvasPadding / 2)) + 'px';
         tile.appendChild(nameContainerEl);
 
         var nameEl = document.createElement('span');
@@ -340,7 +511,7 @@
         }
 
         this.element = tile;
-        this.renderIcon();
+        this.renderIcon(true);
         this.grid.element.appendChild(tile);
       }
 

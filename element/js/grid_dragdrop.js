@@ -15,7 +15,7 @@
   const EDGE_PAGE_THRESHOLD = 50;
 
   /* This delay is the time to wait before rearranging a collection. */
-  const REARRANGE_COLLECTION_DELAY = 1500;
+  const REARRANGE_COLLECTION_DELAY = 500;
 
   const SCREEN_HEIGHT = window.innerHeight;
 
@@ -260,13 +260,14 @@
         this.positionIcon(touch.pageX, touch.pageY);
       }
 
+      var scrollStep;
       var docScroll = this.scrollable.scrollTop;
       var distanceFromTop = Math.abs(touch.pageY - docScroll);
       var distanceFromHeader = distanceFromTop -
         (this.editHeaderElement ? this.editHeaderElement.clientHeight : 0);
       if (distanceFromTop > SCREEN_HEIGHT - EDGE_PAGE_THRESHOLD) {
         var maxY = this.maxScroll;
-        var scrollStep = this.getScrollStep(SCREEN_HEIGHT - distanceFromTop);
+        scrollStep = this.getScrollStep(SCREEN_HEIGHT - distanceFromTop);
         // We cannot exceed the maximum scroll value
         if (touch.pageY >= maxY || maxY - touch.pageY < scrollStep) {
           this.isScrolling = false;
@@ -275,7 +276,15 @@
 
         doScroll.call(this, scrollStep);
       } else if (touch.pageY > 0 && distanceFromHeader < EDGE_PAGE_THRESHOLD) {
-        doScroll.call(this, 0 - this.getScrollStep(distanceFromHeader));
+        // We cannot go below the minimum scroll value
+        scrollStep = this.getScrollStep(distanceFromHeader);
+        scrollStep = Math.min(scrollStep, this.scrollable.scrollTop);
+        if (scrollStep <= 0) {
+          this.isScrolling = false;
+          return;
+        }
+
+        doScroll.call(this, -scrollStep);
       } else {
         this.isScrolling = false;
       }
@@ -358,7 +367,8 @@
       this.inEditMode = true;
       this.container.classList.add('edit-mode');
       document.body.classList.add('edit-mode');
-      window.dispatchEvent(new CustomEvent('gaiagrid-editmode-start'));
+      this.gridView.element.dispatchEvent(
+        new CustomEvent('editmode-start'));
       document.addEventListener('visibilitychange', this);
     },
 
@@ -372,7 +382,7 @@
       this.inEditMode = false;
       this.container.classList.remove('edit-mode');
       document.body.classList.remove('edit-mode');
-      window.dispatchEvent(new CustomEvent('gaiagrid-editmode-end'));
+      this.gridView.element.dispatchEvent(new CustomEvent('editmode-end'));
       document.removeEventListener('visibilitychange', this);
       this.removeDragHandlers();
       this.gridView.render({skipItems: true});
@@ -397,7 +407,6 @@
       switch(e.type) {
           case 'visibilitychange':
             if (document.hidden) {
-              this.finish();
               this.exitEditMode();
             }
             break;
